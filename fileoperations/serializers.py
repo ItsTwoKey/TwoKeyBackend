@@ -166,6 +166,8 @@ class SharedFilesRecepient(ModelSerializer):
 
 class AccessLogSerializer(serializers.ModelSerializer):
 
+    profile_pic = serializers.CharField(required=False)
+
     class Meta:
         model = AccessLog
         exclude = ["timestamp", "id"]
