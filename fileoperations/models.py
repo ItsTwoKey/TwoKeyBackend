@@ -105,7 +105,7 @@ class AccessLog(models.Model):
     user = models.UUIDField()
     username = models.CharField(max_length=100,default="")
     user_email = models.EmailField(default="")
-    profile_pic = models.CharField(default="")
+    profile_pic = models.CharField(default="https://cderhtrlfxroiyqqzytr.supabase.co/storage/v1/object/public/avatar/profilePicDummy.jpg")
     file = models.UUIDField()
     file_name = models.CharField(max_length=500,default="")
     event = models.CharField(default="")
