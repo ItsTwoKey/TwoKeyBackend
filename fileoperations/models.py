@@ -47,6 +47,7 @@ class Folder(models.Model):
     owner = models.ForeignKey(UserInfo,on_delete=models.CASCADE,blank=True, null=True,db_column='owner')
     org = models.UUIDField()
     dept = models.ForeignKey(Departments,on_delete=models.SET_NULL,blank=True,null=True)
+    metadata = models.JSONField(blank=True, null=True)
     
     class Meta:
         db_table = "folder"
