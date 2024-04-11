@@ -31,7 +31,7 @@ class AUserGetInfoSerializer(ModelSerializer):
     dept = serializers.SerializerMethodField()
     class Meta:
         model = UserInfo
-        fields = ['id','dept','manager','role_priv','is_approved','is_active']
+        fields = ['id','dept','manager','role_priv','is_approved','is_active','metadata']
 
     def get_dept(self,instance):
         try:
