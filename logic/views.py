@@ -31,7 +31,7 @@ class InviteUserView(ModelViewSet):
     permission_classes = [OrgadminRequired]
     serializer_class = InviteUserSerializer
     
-    def invite_user(self, user, user_org, confirmation_token):
+    def invite_user(self, user, user_org,department,role,first_name,last_name, confirmation_token):
         try:
             serializer = UsersSerializer(data=user)
             if serializer.is_valid():
@@ -39,6 +39,10 @@ class InviteUserView(ModelViewSet):
                 # Adding user to the organization
                 data = UserInfo.objects.get(pk=instance.id)
                 data.org = user_org
+                data.dept = department
+                data.role_priv = role
+                data.name = first_name
+                data.last_name = last_name
                 data.save()
                 # Sending the mail
                 email_response = send_email(user['email'], user['encrypted_password'], confirmation_token)
@@ -51,9 +55,31 @@ class InviteUserView(ModelViewSet):
 
     def invite_driver(self, request):
         user_org = request.user.org
+        # department_id = request.data.get('dept_id',None)
+        # print("yooo",department_id)
+
+
+
         serializer = InviteUserSerializer(data=request.data)
+        
         if serializer.is_valid():
             emails = serializer.validated_data.get('emails', [])
+            try:
+                first_name = request.data.get('first_name','')
+                last_name = request.data.get('last_name','')
+
+
+                department_id = request.data[ 'dept_id']
+                department = Departments.objects.get(pk=department_id)  # Or filter by ID
+
+                role_id = request.data['role_id']
+                role = Role.objects.get(pk=role_id).role  # Or filter by ID
+
+            except Departments.DoesNotExist:
+                return Response({"msg":"Invalid Department Id"},status=status.HTTP_400_BAD_REQUEST)
+            except Role.DoesNotExist:
+                return Response({"msg":"Invalid Role Id"},status=status.HTTP_400_BAD_REQUEST)
+
             failed_invites = []
             for email in emails:
                 confirmation_token = generate_confirmation_token()
@@ -64,7 +90,7 @@ class InviteUserView(ModelViewSet):
                     "confirmation_token": confirmation_token,
                     "raw_app_meta_data": {"provider": "email", "providers": ["email"]},
                 }
-                if not self.invite_user(user, user_org, confirmation_token):
+                if not self.invite_user(user, user_org,department,role,first_name,last_name, confirmation_token):
                     failed_invites.append(email)
 
             if failed_invites:

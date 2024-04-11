@@ -68,7 +68,7 @@ class AUserGetInfoSerializer(ModelSerializer):
 class NUserSetInfoSerializer(ModelSerializer):
     class Meta:
         model = UserInfo
-        exclude = ['is_approved','is_authenticated','org','role_priv','metadata']
+        exclude = ['is_approved','is_authenticated','org','role_priv']
 
 
 class NUserGetInfoSerializer(ModelSerializer):
@@ -76,7 +76,7 @@ class NUserGetInfoSerializer(ModelSerializer):
     dept = serializers.SerializerMethodField()
     class Meta:
         model = UserInfo
-        exclude = ['is_approved','is_authenticated','org','role_priv','metadata']
+        exclude = ['is_approved','is_authenticated','org','role_priv']
 
     def get_manager(self,instance):
         try:
@@ -103,5 +103,11 @@ class NUserGetInfoSerializer(ModelSerializer):
     
 class InviteUserSerializer(serializers.Serializer):
     emails = serializers.ListField(child=serializers.EmailField())
+    dept_id = serializers.UUIDField()
+    role_id = serializers.UUIDField()
+    first_name= serializers.CharField()
+    last_name= serializers.CharField()
+
+
     class Meta:
-        fields = ["emails"]
+        fields = ["emails","dept_id",'role_id','first_name','last_name']
