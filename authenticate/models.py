@@ -47,3 +47,22 @@ class Users(models.Model):
         db_table = 'auth\".\"users'
         
         db_table_comment = 'Auth: Stores user login data within a secure schema.'
+
+class Identity(models.Model):
+    provider_id = models.TextField(null=False)
+    user = models.ForeignKey(Users, on_delete=models.CASCADE, related_name='identities')
+    identity_data = models.JSONField(null=False)
+    provider = models.TextField(null=False)
+    last_sign_in_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True)
+    email = models.EmailField(null=True)
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    class Meta:
+        managed = True
+        db_table = 'auth\".\"identities'
+        constraints = [
+            models.UniqueConstraint(fields=['provider_id', 'provider'], name='identities_provider_id_provider_unique'),
+        ]
+    
