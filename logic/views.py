@@ -44,6 +44,16 @@ class InviteUserView(ModelViewSet):
                 data.name = first_name
                 data.last_name = last_name
                 data.save()
+
+                #Creating Entry in identities Table
+                identity = Identity(
+                    provider_id=instance.id,
+                    user_id = instance.id,
+                    identity_data = {"sub":instance.id,"email":data.email,"email_verified":False,"phone_verified":False},
+                    provider= "email",
+                    email = data.email
+                )
+                identity.save()
                 # Sending the mail
                 email_response = send_email(user['email'], user['encrypted_password'], confirmation_token)
                 print(email_response)
@@ -90,6 +100,7 @@ class InviteUserView(ModelViewSet):
                     "confirmation_token": confirmation_token,
                     "raw_app_meta_data": {"provider": "email", "providers": ["email"]},
                 }
+
                 if not self.invite_user(user, user_org,department,role,first_name,last_name, confirmation_token):
                     failed_invites.append(email)
 
