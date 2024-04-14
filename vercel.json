@@ -10,4 +10,8 @@
             "dest": "backend/wsgi.py"
         }
     ]
+    ,
+    
+        "outputDirectory": "build"
+      
 }
