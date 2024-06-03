@@ -10,4 +10,5 @@ urlpatterns = [
     path('',include('logic.urls')),
     path('file/',include('fileoperations.urls')),
     path('auth/',include('firebase_auth.urls')),
+    path('users/',include('users.urls'))
 ]

@@ -36,10 +36,11 @@ def sign_up(request):
 
 @csrf_exempt
 def login(request):
-    if request.method == 'POST':
+    if request.method == 'PUT':
         data = json.loads(request.body)
         email = data.get('email')
-        password = data.get('password')
+        is_active = data.get('is_active')
+        metadata = data.get('metadata')
 
         try:
             user = auth.get_user_by_email(email)
@@ -47,9 +48,87 @@ def login(request):
             # Check if the user's email is verified
             if not user.email_verified:
                 return JsonResponse({'error': 'Email not verified'}, status=401)
+            else:
+                try:
+                    doc_ref = db.collection('users').document(user.uid)
+                    doc_ref.update({'is_active': is_active, 'metadata': metadata})  # Fix: Pass key-value pairs as a dictionary
+                    doc = doc_ref.get()
+                    username = doc.to_dict()
 
-            # Sign in the user with email and password
+                    user_dict = {
+                    'uid': user.uid,
+                    'email': user.email,
+                    'username': user.display_name,
+                    'email_verified': user.email_verified,
+                    'phone_number': user.phone_number,
+                    'photo_url': user.photo_url,
+                    'disabled': user.disabled,
+                    'fullName':username['fullName']
+                    }
+
+                    return JsonResponse({'user': user_dict, 'message': 'Logged In updated successfully'}, status=200)  # Fix: Wrap 'user' in a dictionary
+                except Exception as e:
+                    return JsonResponse({'error': str(e)}, status=500)
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
 
+    return JsonResponse({'error': 'Invalid request method'}, status=400)
+
+
+@csrf_exempt
+def find_user(request):
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        id_token = data.get('idToken')
+
+        if not id_token:
+            return JsonResponse({'error': 'Missing ID token'}, status=400)
+
+        try:
+            # Verify the ID token
+            decoded_token = auth.verify_id_token(id_token)
+            uid = decoded_token['uid']
+
+            # Fetch user information from Firestore
+            user_ref = db.collection('users').document(uid)
+            user_doc = user_ref.get()
+
+            if not user_doc.exists:
+                return JsonResponse({'error': 'User not found'}, status=404)
+
+            user_data = user_doc.to_dict()
+
+            return JsonResponse({'user': user_data}, status=200)
+
+        except auth.InvalidIdTokenError:
+            return JsonResponse({'error': 'Invalid ID token'}, status=401)
+        except auth.ExpiredIdTokenError:
+            return JsonResponse({'error': 'Expired ID token'}, status=401)
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=500)
+
+    return JsonResponse({'error': 'Invalid request method'}, status=400)
+
+@csrf_exempt
+def logout(request):
+    if request.method == 'PUT':
+        data = json.loads(request.body)
+        id_token = data.get('idToken')
+        is_active = data.get('is_active')
+
+        if not id_token:
+            return JsonResponse({'error': 'Not authorised'}, status=400)
+        
+        try:
+            # Verify the ID token
+            decoded_token = auth.verify_id_token(id_token)
+            uid = decoded_token['uid']  # Corrected the key name to 'uid'
+
+            # Fetch user information from Firestore
+            user_ref = db.collection('users').document(uid)
+            user_ref.update({'is_active': is_active})  # Fix: Pass key-value pairs as a dictionary
+            return JsonResponse({"message": "Logged out successfully"}, status=200)
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=500)
+        
     return JsonResponse({'error': 'Invalid request method'}, status=400)
