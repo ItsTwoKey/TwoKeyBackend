@@ -7,6 +7,9 @@ from decouple import config
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# only for windows
+GDAL_LIBRARY_PATH = str(Path('D:/Nishanth/TwoKey/code/venv/Lib/site-packages/osgeo/gdal.dll'))
+os.environ['GDAL_LIBRARY_PATH'] = GDAL_LIBRARY_PATH
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.1/howto/deployment/checklist/
@@ -28,7 +31,6 @@ BREVO_KEY = os.environ.get('BREVO_KEY')
 DEPLOY_URL = os.environ.get('DEPLOY_URL')
 DEBUG = True
 
-
 APPEND_SLASH = False
 # Application definition
 
@@ -47,6 +49,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_spectacular',
     'rest_framework_gis',
+    'rest_framework_simplejwt',
     ]
 
 MIDDLEWARE = [
@@ -165,6 +168,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Swagger UI
 REST_FRAMEWORK = {
     # YOUR SETTINGS
+     'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
 SPECTACULAR_SETTINGS = {

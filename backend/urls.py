@@ -9,4 +9,5 @@ urlpatterns = [
     path('api/schema/docs/',SpectacularSwaggerView.as_view(url_name="schema")),
     path('',include('logic.urls')),
     path('file/',include('fileoperations.urls')),
+    path('auth/',include('firebase_auth.urls')),
 ]
