@@ -27,15 +27,15 @@ class UserInfo(models.Model):
     # Personal Info
     id = models.UUIDField(primary_key=True)
     username = models.CharField(default='',null=True)
-    name =models.CharField(default='')
+    name =models.CharField(default='',null=True)
     last_name = models.CharField(default='')
     email = models.EmailField(default=None)
     phone = models.BigIntegerField(default=None,null=True)
-    profile_pic = models.URLField(default="https://cderhtrlfxroiyqqzytr.supabase.co/storage/v1/object/public/avatar/profilePicDummy.jpg",null=True)
+    profilePictureUrl = models.URLField(default="https://cderhtrlfxroiyqqzytr.supabase.co/storage/v1/object/public/avatar/profilePicDummy.jpg",null=True)
     # Work Info
-    org = models.ForeignKey(Organizations, on_delete=models.CASCADE,default=None)
+    org = models.CharField(default=None,null=False)
     role_priv = models.CharField(max_length=20,default="employee")
-    dept = models.ForeignKey(Departments, models.DO_NOTHING,default=None)
+    dept = models.CharField(default=None, null=False)
     manager = models.ForeignKey('self', on_delete=models.SET_NULL, blank=True, null=True)
     # Address Info
     country = models.CharField(max_length=30,default='',blank=True)

@@ -13,7 +13,20 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import generics
 from rest_framework.decorators import action, permission_classes
 
-from authenticate.models import Users
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from firebase_admin import auth, firestore
+from backend.firebase_admin_init import db
+from backend.custom_perm_classes import SuperadminRequired
+from .serializers import OrganizationSerializer
+from rest_framework.decorators import api_view, permission_classes,authentication_classes
+from rest_framework.permissions import AllowAny
+from rest_framework import status
+from rest_framework.response import Response
+import json
+
+from backend.firebase_auth import FirebaseAuthBackend
+from authenticate.models import Identity, Users
 from authenticate.serializers import UsersSerializer
 from backend.custom_perm_classes import *
 from backend.supabase_auth import SupabaseAuthBackend
@@ -134,7 +147,7 @@ class InviteUserView(ModelViewSet):
 
 # Organization ViewSet
 class OrgView(mixins.ListModelMixin, mixins.CreateModelMixin, GenericViewSet):
-    authentication_classes = [SupabaseAuthBackend]
+    authentication_classes = [FirebaseAuthBackend]
     permission_classes = [SuperadminRequired]
     serializer_class = OrganizationSerializer
 
@@ -153,6 +166,41 @@ class OrgView(mixins.ListModelMixin, mixins.CreateModelMixin, GenericViewSet):
             self.permission_classes = [AllowAny]
         return super().get_permissions()
 
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+@csrf_exempt  # Assuming you are not using session authentication
+def list_orgs(request):
+    try:
+        orgs_ref = db.collection('organizations')
+        orgs = orgs_ref.stream()
+
+        response_data = []
+        for org in orgs:
+            org_data = org.to_dict()
+            org_data['id'] = org.id
+            response_data.append(org_data)
+
+        return JsonResponse(response_data, safe=False, status=200)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([IsAuthenticated])
+@csrf_exempt  # Assuming you are not using session authentication
+def create_orgs(request):
+    try:
+        data = json.loads(request.body)
+        org_ref = db.collection('organizations').document()
+        org_ref.set(data)
+
+        # Get the new document's ID
+        data['id'] = org_ref.id
+
+        return JsonResponse(data, status=201)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
 # Department ViewSet
 class DeptView(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyModelMixin ,mixins.UpdateModelMixin, GenericViewSet):
@@ -200,6 +248,90 @@ class DeptView(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyMod
         return super().get_permissions()
 
 
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([IsAuthenticated])
+@csrf_exempt
+def list_depts(request):
+    try:
+        org_id = request.user.org
+        depts_ref = db.collection('departments').where('org', '==', org_id)
+        depts = depts_ref.stream()
+
+        response_data = []
+        for dept in depts:
+            dept_data = dept.to_dict()
+            dept_data['id'] = dept.id
+            response_data.append(dept_data)
+
+        return JsonResponse(response_data, safe=False, status=200)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def create_dept(request):
+    try:
+        data = json.loads(request.body)
+        org_id = request.user.org
+        data['org'] = org_id
+        name = data.get('name')
+        metadata = data.get('metadata')
+
+        dept_ref = db.collection('departments').document()
+        dept_ref.set({'name': name, 'metadata': metadata, 'org': org_id})
+
+        data['id'] = dept_ref.id
+
+        return JsonResponse(data, status=201)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['DELETE'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def delete_dept(request, id):
+    try:
+        user = request.user
+        dept_ref = db.collection('departments').document(id)
+        dept = dept_ref.get()
+
+        if dept.exists and dept.to_dict().get('org') == user.org:
+            dept_ref.delete()
+            return JsonResponse({'message': 'Department deleted successfully'}, status=200)
+        else:
+            return JsonResponse({'error': 'Department not found or unauthorized'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@api_view(['PATCH'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def update_dept(request, id):
+    try:
+        data = json.loads(request.body)
+        user = request.user
+        dept_ref = db.collection('departments').document(id)
+        dept = dept_ref.get()
+        newName = data.get('name')
+        metadata = data.get('metadata')
+
+        if dept.exists and dept.to_dict().get('org') == user.org:
+            dept_ref.update({'name': newName, 'metadata': metadata})
+            updated_dept = dept_ref.get().to_dict()
+            updated_dept['id'] = id
+            return JsonResponse(updated_dept, status=200)
+        else:
+            return JsonResponse({'error': 'Department not found or unauthorized'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+
 # User ViewSet for Org Admin
 class AUserViewSet(
     mixins.ListModelMixin,
@@ -210,129 +342,225 @@ class AUserViewSet(
 ):
     # Default Permission required for this class
     permission_classes = [OrgadminRequired]
+    authentication_classes= [FirebaseAuthBackend]
 
-    queryset = UserInfo.objects.all()
-    serializer_class = AUserGetInfoSerializer
-    authentication_classes = [SupabaseAuthBackend]
-    lookup_field = "id"
+    # Define serializer class based on the action
+    def get_serializer_class(self):
+        if self.action == 'list_users':
+            return AUserGetInfoSerializer
+        if self.action == 'elevate':
+            return AUserSetInfoSerializer
+        return AUserGetInfoSerializer
 
+    # List users based on organization and department
     def list_users(self, request, *args, **kwargs):
-        org_id = request.user.org_id
+        org_id = request.user.org
         dept = kwargs.get("dept")
+        users_ref = db.collection('users')
         if dept:
-            try:
-                dept_id = Departments.objects.get(name=dept)
-                self.queryset = UserInfo.objects.filter(org=org_id, dept=dept_id)
-            except Departments.DoesNotExist:
+            dept_ref = db.collection('departments').where('name', '==', dept).get()
+            if not dept_ref:
                 return Response(
                     {"error": "department not found"}, status=status.HTTP_404_NOT_FOUND
                 )
+            dept_id = dept_ref[0].id
+            query = users_ref.where('org', '==', org_id).where('dept', '==', dept_id)
         else:
-            self.queryset = (
-                UserInfo.objects.filter(org=org_id)
-                .exclude(id=request.user.id)
-                .order_by("-role_priv")
-            )
-            # self.queryset = Users.objects.filter(org=org_id)
-        return self.list(request, context={'request':request}, **kwargs)
+            query = users_ref.where('org', '==', org_id).order_by('role_priv', direction=firestore.Query.DESCENDING)
+        users = [doc.to_dict() for doc in query.stream() if doc.id != request.user.id]
+        return Response(users, status=status.HTTP_200_OK)
 
-    # Checking the Role's Existance
+    # Partial update to check role existence
     def partial_update(self, request, *args, **kwargs):
-
         if "role_priv" in request.data:
-            # serializer = RoleSerializer(data=request.data["role_priv"], partial=True)
-            # kk = serializer.is_valid()
-
             role = request.data["role_priv"]
-            try:
-                Role.objects.get(role=role)
-            except Role.DoesNotExist:
+            role_ref = db.collection('roles').where('role', '==', role).get()
+            if not role_ref:
                 return Response(
                     {"error": "this role does not exist"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            except exceptions.ValidationError:
-                return Response(
-                    {"error": "invalid value"}, status=status.HTTP_400_BAD_REQUEST
-                )
             return super().partial_update(request, *args, **kwargs)
         else:
             return super().partial_update(request, *args, **kwargs)
 
+    # Elevate user
     def elevate(self, request, *args, **kwargs):
         self.serializer_class = AUserSetInfoSerializer
-        pk = kwargs.get("pk")
-        resp = self.partial_update(request, *args, **kwargs)
-        return resp
+        return self.partial_update(request, *args, **kwargs)
 
-    # Get diffent files using the type param
-    # type = owned or received or shared
+    # Get user info and related files
     def get_user_info(self, request, **kwargs):
-        # Queried user instance
         user = request.user
         user_org = user.org
         instance = self.get_object()
+        combined_data = {}
 
         try:
             n = int(request.GET.get("recs", "0"))
-            file_type = request.GET.get("type")  
-            logs = request.GET.get("logs","0")
+            file_type = request.GET.get("type")
+            logs = request.GET.get("logs", "0")
         except ValueError:
             return Response(
                 {"error": "invalid parameter"}, status=status.HTTP_400_BAD_REQUEST
             )
-        except Exception as error:
-            return Response({"error": str(error)})
-        
-        if(logs == "1"):
+
+        if logs == "1":
             self.serializer_class = AccessLogSerializer
             user_id = kwargs.get("id")
-            self.queryset = AccessLog.objects.filter(org_id = user_org.id,user=user_id).order_by("-timestamp")
-            self.queryset = self.queryset[:n] if n >= 1 else self.queryset
-            return self.list(request)
-        
+            query = db.collection('access_logs').where('org_id', '==', user_org.id).where('user', '==', user_id).order_by('timestamp', direction=firestore.Query.DESCENDING)
+            logs = [doc.to_dict() for doc in query.stream()]
+            logs = logs[:n] if n >= 1 else logs
+            return Response(logs, status=status.HTTP_200_OK)
 
-        combined_data = {}
+        files_ref = db.collection('files')
+
         if file_type == "owned":
-            # Fetching files owned by user
-            files_owned_by_user = Objects.objects.filter(owner=instance)
-            owned_files_data = FileSerializer(files_owned_by_user, many=True).data
+            files_owned_by_user = files_ref.where('owner', '==', instance.id).get()
+            owned_files_data = [doc.to_dict() for doc in files_owned_by_user]
             combined_data["files"] = owned_files_data
 
         elif file_type == "received":
-            # Fetching files shared with the user
-            files_shared_with_user = Objects.objects.filter(
-                sharedfiles__shared_with=instance
-            )
-            shared_files_data = FileSerializer(files_shared_with_user, many=True).data
+            files_shared_with_user = files_ref.where('shared_with', 'array_contains', instance.id).get()
+            shared_files_data = [doc.to_dict() for doc in files_shared_with_user]
             combined_data["files"] = shared_files_data
 
         elif file_type == "shared":
-            # Fetching files shared by user
-            files_shared_by_user = Objects.objects.filter(
-                sharedfiles__file__owner=instance.id
-            )
-            shared_files_by_user_data = FileSerializer(
-                files_shared_by_user, many=True
-            ).data
+            files_shared_by_user = files_ref.where('owner', '==', instance.id).get()
+            shared_files_by_user_data = [doc.to_dict() for doc in files_shared_by_user]
             combined_data["files"] = shared_files_by_user_data
 
-        # User profile data
         user_data = self.get_serializer(instance).data
         combined_data["user_info"] = user_data
 
         return Response(combined_data, status=status.HTTP_200_OK)
 
-    def delete_user(self, request,**kwargs):
+    # Delete user
+    def delete_user(self, request, **kwargs):
         user = request.user
         self.lookup_field = 'id'
-        self.queryset = UserInfo.objects.filter(org = user.org_id)
-        return self.destroy(request,**kwargs)
-    
+        user_id = kwargs.get('id')
+        db.collection('users').document(user_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # Set permissions based on action
     def get_permissions(self):
         if self.action == "list_users":
             self.permission_classes = [OthersPerm]
         return super().get_permissions()
+
+
+@api_view(['GET'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def list_users(request, *args, **kwargs):
+    org_id = request.user.org
+    dept = kwargs.get("dept")
+    users_ref = db.collection('users')
+    if dept:
+        dept_ref = db.collection('departments').where('name', '==', dept).get()
+        if not dept_ref:
+            return Response(
+                {"error": "department not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        dept_id = dept_ref[0].id
+        query = users_ref.where('org', '==', org_id).where('dept', '==', dept_id)
+    else:
+        query = users_ref.where('org', '==', org_id).order_by('role_priv', direction=firestore.Query.DESCENDING)
+    users = [doc.to_dict() for doc in query.stream() if doc.id != request.user.id]
+    print(users)
+    return Response(users, status=status.HTTP_200_OK)
+
+@api_view(['PATCH'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def partial_update(request, *args, **kwargs):
+    if "role_priv" in request.data:
+        role = request.data["role_priv"]
+        role_ref = db.collection('roles').where('role', '==', role).get()
+        if not role_ref:
+            return Response(
+                {"error": "this role does not exist"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user_id = kwargs.get('id')
+        user_ref = db.collection('users').document(user_id)
+        user_ref.update(request.data)
+        return Response({"status": "role updated"}, status=status.HTTP_200_OK)
+    else:
+        return Response({"error": "role_priv not provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['PATCH'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def elevate(request, id):
+    data = request.data
+    user_ref = db.collection('users').document(id)
+    user_ref.update(data)
+    return Response({"status": "elevated"}, status=status.HTTP_200_OK)
+
+@api_view(['GET'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def get_user_info(request, **kwargs):
+    user = request.user
+    user_org = user.org
+    user_id = kwargs.get('id')
+    instance_ref = db.collection('users').document(user_id)
+    instance = instance_ref.get().to_dict()
+
+    try:
+        n = int(request.GET.get("recs", "0"))
+        file_type = request.GET.get("type")
+        logs = request.GET.get("logs", "0")
+    except ValueError:
+        return Response(
+            {"error": "invalid parameter"}, status=status.HTTP_400_BAD_REQUEST
+        )
+
+    combined_data = {}
+    if logs == "1":
+        user_id = kwargs.get("id")
+        query = db.collection('access_logs').where('org_id', '==', user_org.id).where('user', '==', user_id).order_by('timestamp', direction=firestore.Query.DESCENDING)
+        logs = [doc.to_dict() for doc in query.stream()]
+        logs = logs[:n] if n >= 1 else logs
+        return Response(logs, status=status.HTTP_200_OK)
+
+    files_ref = db.collection('files')
+
+    if file_type == "owned":
+        files_owned_by_user = files_ref.where('owner', '==', user_id).get()
+        owned_files_data = [doc.to_dict() for doc in files_owned_by_user]
+        combined_data["files"] = owned_files_data
+
+    elif file_type == "received":
+        files_shared_with_user = files_ref.where('shared_with', 'array_contains', user_id).get()
+        shared_files_data = [doc.to_dict() for doc in files_shared_with_user]
+        combined_data["files"] = shared_files_data
+
+    elif file_type == "shared":
+        files_shared_by_user = files_ref.where('owner', '==', user_id).get()
+        shared_files_by_user_data = [doc.to_dict() for doc in files_shared_by_user]
+        combined_data["files"] = shared_files_by_user_data
+
+    user_data = instance
+    combined_data["user_info"] = user_data
+
+    return Response(combined_data, status=status.HTTP_200_OK)
+
+@api_view(['DELETE'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def delete_user(request, **kwargs):
+    user = request.user
+    user_id = kwargs.get('id')
+    db.collection('users').document(user_id).delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 
@@ -400,3 +628,43 @@ class RolesViewset(
         if self.action == "list_roles":
             self.permission_classes = [OrgadminRequired]
         return super().get_permissions()
+
+db = firestore.client()
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def list_roles(request):
+    roles_ref = db.collection('roles')
+    roles = [doc.to_dict() for doc in roles_ref.stream()]
+    return Response(roles, status=status.HTTP_200_OK)
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([SuperadminRequired])
+@csrf_exempt
+def create_roles(request):
+    data = request.data
+    role_ref = db.collection('roles').document()
+    role_ref.set(data)
+    return Response({"id": role_ref.id}, status=status.HTTP_201_CREATED)
+
+@api_view(['PUT', 'PATCH'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([SuperadminRequired])
+@csrf_exempt
+def update_roles(request, id):
+    data = request.data
+    role_ref = db.collection('roles').document(id)
+    role_ref.update(data)
+    return Response({"status": "updated"}, status=status.HTTP_200_OK)
+
+@api_view(['DELETE'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([SuperadminRequired])
+@csrf_exempt
+def delete_roles(request, id):
+    role_ref = db.collection('roles').document(id)
+    role_ref.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)

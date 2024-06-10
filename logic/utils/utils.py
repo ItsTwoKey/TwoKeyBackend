@@ -67,7 +67,6 @@ def send_email(to_address,password,confirmation_token):
     # Create a SendSmtpEmail object
     send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(to=to,template_id=template_id, params={"email": email, "password": password,"link":link})
 
-
     try:
         # Send the email
         api_response = api_instance.send_transac_email(send_smtp_email)

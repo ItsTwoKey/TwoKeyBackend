@@ -22,9 +22,14 @@ def sign_up(request):
 
         try:
             db.collection('users').document(uid).set({
-                'organization': organization,
-                'fullName': full_name,
-                'email': email
+                'org': organization,
+                'name': full_name,
+                'email': email,
+                "role_priv": "employee",
+                "username": "",
+                "last_name": "",
+                "dept": "",
+                "profilePictureUrl": "",
             })
 
             return JsonResponse({'message': f'Verification email sent to {email}, proceed to login'})
@@ -51,19 +56,24 @@ def login(request):
             else:
                 try:
                     doc_ref = db.collection('users').document(user.uid)
-                    doc_ref.update({'is_active': is_active, 'metadata': metadata})  # Fix: Pass key-value pairs as a dictionary
+                    doc_ref.update({'is_active': is_active, 'metadata': metadata, 'is_authenticated':True })  # Fix: Pass key-value pairs as a dictionary
                     doc = doc_ref.get()
-                    username = doc.to_dict()
+                    user_dict = doc.to_dict()
 
                     user_dict = {
                     'uid': user.uid,
                     'email': user.email,
-                    'username': user.display_name,
+                    'username': user_dict['username'],
                     'email_verified': user.email_verified,
                     'phone_number': user.phone_number,
                     'photo_url': user.photo_url,
                     'disabled': user.disabled,
-                    'fullName':username['fullName']
+                    'name':user_dict['name'],
+                    'last_name':user_dict['last_name'],
+                    'dept':user_dict['dept'],
+                    'profilePictureUrl':user_dict['profilePictureUrl'], 
+                    'is_active': True,
+                    'is_authenticated': True,
                     }
 
                     return JsonResponse({'user': user_dict, 'message': 'Logged In updated successfully'}, status=200)  # Fix: Wrap 'user' in a dictionary

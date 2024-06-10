@@ -1,5 +1,6 @@
 # views.py
 import base64
+from datetime import timedelta
 import uuid
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -33,10 +34,14 @@ def update_profile(request):
                 filename = f"{uid}_{uuid.uuid4()}.jpg"
                 # Upload the image to Firebase Storage
                 bucket = storage.bucket()
-                blob = bucket.blob(f"profile_pictures/{filename}")
+                blob = bucket.blob(f"user_data/{uid}/profile_pictures/{filename}")
                 blob.upload_from_string(image_data, content_type='image/jpeg')
-                # Get the public URL of the uploaded image
+                
+                 # Make the image publicly readable
+                blob.make_public()
                 image_url = blob.public_url
+                
+                # print(blob.public_url)
                 update_data['profilePictureUrl'] = image_url
             except Exception as e:
                 return Response({'error': f"Failed to upload profile picture: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
