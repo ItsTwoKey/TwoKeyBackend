@@ -1,3 +1,4 @@
+import datetime
 import uuid
 from django.core.cache import cache
 from django.core import exceptions
@@ -5,8 +6,11 @@ from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import Distance
 from decouple import config
 from django.db import connection, reset_queries
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.db.models import Prefetch
+from django.views.decorators.csrf import csrf_exempt
+
 
 from rest_framework.viewsets import GenericViewSet , ModelViewSet
 from rest_framework.views import APIView
@@ -14,7 +18,10 @@ from rest_framework import mixins, generics
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes, authentication_classes
 
+from backend.firebase_auth import FirebaseAuthBackend
+from backend.firebase_admin_init import db
 from backend import settings
 from backend.custom_perm_classes import SuperadminRequired, OrgadminRequired, OthersPerm
 from backend.supabase_auth import SupabaseAuthBackend
@@ -36,6 +43,8 @@ from fileoperations.serializers import (
 from .utils.supa import create_signed
 from django.views.decorators.cache import cache_page
 from django.utils.decorators import method_decorator
+
+from firebase_admin import firestore, storage
 
 
 Cache_TTL = 60
@@ -153,94 +162,287 @@ class FileListing(mixins.ListModelMixin, generics.GenericAPIView):
         self.queryset = Objects.objects.prefetch_related(Prefetch('file_info', queryset=File_Info.objects.prefetch_related('depts'))).filter(sharedfiles__shared_with=user)
         return self.list(request)
 
+@api_view(['GET'])
+@permission_classes([OthersPerm])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def list_files(request, *args, **kwargs):
+    file_type = request.GET.get("type")
+    user = request.user
+    dept_choice = user.dept
+    print(dept_choice,file_type)
+    try:
+        n = int(request.GET.get("recs", "0"))
+    except ValueError:
+        return JsonResponse({"error": "invalid parameter"}, status=400)
+    except Exception as error:
+        return JsonResponse({"error": str(error)}, status=400)
 
-class AddDepartmentsToFileView(generics.GenericAPIView):    
-    authentication_classes = [SupabaseAuthBackend]
-    permission_classes = [OrgadminRequired]
-    def post(self, request, file):
-           file_info = get_object_or_404(File_Info, file=file)
-           serializer = AddDepartmentsSerializer(data=request.data)
+    if file_type == "owned":
+        return get_files_owned_by_user(request, user)
+    elif file_type == "received":
+        return get_files_shared_to_user(request, user)
+    elif file_type == "shared":
+        return get_files_shared_by_user(request, user)
+    else:
+        return get_all_files(request, dept_choice, n)
 
-           if serializer.is_valid():
-               department_ids = serializer.validated_data.get('department_ids', [])
+def get_all_files(request, dept_choice, n, *args, **kwargs):
+    user = request.user
+    org_id = user.org
+    
+    files_ref = db.collection('files').document('organisations').collection(org_id)
+    
+    if user.role_priv == 'org_admin':
+        files_ref = files_ref
+    elif dept_choice:
+        dept_ref = db.collection('departments').document(dept_choice).get()
+        if not dept_ref.exists:
+            return JsonResponse({"error": "invalid request"}, status=400)
+        dept_id = dept_ref.id
+        files_ref = files_ref.where('department_ids', 'array_contains', dept_id)
+    
+    files = files_ref.stream()
+    file_list = [{"id": file.id, **file.to_dict()} for file in files]
 
-               # Validate that each department ID exists
-               for department_id in department_ids:
-                   get_object_or_404(Departments, id=department_id)
+    return JsonResponse(file_list[:n] if n > 0 else file_list, safe=False)
 
-               # Check if departments are already associated and add only unique departments
-               unique_department_ids = set(department_ids) - set(file_info.depts.values_list('id', flat=True))
+def get_files_owned_by_user(request, user):
+    user_id = user.id
+    org_id = user.org
+    files_ref = db.collection('files').document('organisations').collection(org_id).where('owner_id', '==', user_id)
+    files = files_ref.stream()
+    file_list = [{"id": file.id, **file.to_dict()} for file in files]
 
-               # Add the unique departments to the File_Info instance
-               file_info.depts.add(*unique_department_ids)
-               file_info.save()
+    return JsonResponse(file_list, safe=False)
 
-               return Response({'detail': 'Departments added successfully'}, status=status.HTTP_200_OK)
+def get_files_shared_by_user(request, user):
+    user_id = user.id
+    shared_ref = db.collection('shared_files','organisations', user.org).where('owner_id', '==', user_id)
+    shared_files = shared_ref.stream()
+    file_ids = [file.to_dict().get('file_id') for file in shared_files]
+    
+    files = []
+    for file_id in file_ids:
+        file = db.collection('files','organisations', user.org).document(file_id).get()
+        is_valid = check_if_share_is_valid(file_id, user)
+        if file.exists and is_valid:
+            file_data = file.to_dict()
+            file_data['id'] = file_id
+            files.append(file_data)
 
-           return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return JsonResponse(files, safe=False)
+
+def get_files_shared_to_user(request, user):
+    user_id = user.id
+    shared_ref = db.collection('shared_files', 'organisations', user.org).where('shared_with', '==', user_id)
+    shared_files = shared_ref.stream()
+    file_ids = [file.to_dict().get('file_id') for file in shared_files]
+
+    files = []
+    for file_id in file_ids:
+        file = db.collection('files','organisations', user.org).document(file_id).get()
+        is_valid = check_if_share_is_valid(file_id, user)
+        print('is share valid',is_valid)
+        if file.exists and is_valid:
+            file_data = file.to_dict()
+            file_data['id'] = file_id
+            files.append(file_data)
+
+    return JsonResponse(files, safe=False)
 
 
 
-class FolderViewSet(GenericViewSet,
-mixins.ListModelMixin,
-mixins.CreateModelMixin,
-mixins.DestroyModelMixin,
-):
-    authentication_classes = [SupabaseAuthBackend]
+@api_view(['POST'])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+@authentication_classes([FirebaseAuthBackend])
+def add_departments_to_file(request, file_id, *args, **kwargs):
+    org_id = request.user.org
+    file_ref = db.collection('files', 'organisations', org_id).document(file_id)
+    file_doc = file_ref.get()
+    department_ids = request.data.get('department_ids', [])
+    metadata = request.data.get('metadata', {})
+
+    for department_id in department_ids:
+        department_ref = db.collection('departments').document(department_id)
+        department_doc = department_ref.get()
+        if not department_doc.exists:
+            return Response({'detail': f'Department {department_id} not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not file_doc.exists:
+        # Check if the request contains the 'new' property to create a new file
+        if 'new' in request.data:
+            # Assuming the request contains necessary file details like name, etc.
+            file_name = request.data.get('name', '')
+            download_url = request.data.get('downloadURL', '')
+            new_file_data = {
+                'name': file_name,
+                'department_ids': department_ids,
+                'download_url':download_url,
+                'owner_id': request.user.id,
+                'metadata': metadata,
+                'created_at': firestore.SERVER_TIMESTAMP,
+                'updated_at': firestore.SERVER_TIMESTAMP,
+                'profile_pic': request.user.profilePictureUrl,
+            }
+            # Create a new file document
+            file_ref.set(new_file_data)
+            return Response({'detail': 'New file created successfully'}, status=status.HTTP_201_CREATED)
+        else:
+            return Response({'detail': 'File not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if department_ids:
+        # Get current departments associated with the file
+        current_department_ids = set(file_doc.to_dict().get('department_ids', []))
+
+        # Check if departments are already associated and add only unique departments
+        unique_department_ids = set(department_ids) - current_department_ids
+
+        # Update the file with new department IDs
+        new_department_ids = current_department_ids | unique_department_ids
+        file_ref.update({'department_ids': list(new_department_ids)})
+
+        return Response({'detail': 'Departments added successfully'}, status=status.HTTP_200_OK)
+
+    return Response({"errors":["DepartmentId not provided"]}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['DELETE'])
+@permission_classes([OthersPerm])
+@authentication_classes([FirebaseAuthBackend])
+def delete_file(request, file_id):
+    org_id = request.user.org
+    try:
+        file_ref = db.collection('files','organisations',org_id).document(file_id)
+        file_doc = file_ref.get()
+        if not file_doc.exists:
+            return Response({'detail': 'File not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        file_ref.delete()
+        return Response({'detail': 'File deleted successfully'}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# class FolderViewSet(GenericViewSet,
+# mixins.ListModelMixin,
+# mixins.CreateModelMixin,
+# mixins.DestroyModelMixin,
+# ):
+#     authentication_classes = [SupabaseAuthBackend]
+#     permission_classes = [OthersPerm]
+#     serializer_class = FolderSerializer
+#     queryset = Folder.objects.all()
+
+#     def list(self,request):
+#         user_org = request.user.org.id
+#         user_id = request.user.id
+#         queryset = Folder.objects.filter(org=user_org,owner=user_id)
+#         serializer = self.get_serializer(queryset,many=True)
+#         return Response(serializer.data)
+        
+#     def create(self,request):
+#         user = request.user
+#         owner_org_id = user.org.id
+#         owner_dept  = user.dept.id
+#         request.data['org'] = owner_org_id
+#         request.data['dept'] = owner_dept 
+#         request.data['owner'] = user.id
+#         serializer = self.get_serializer(data=request.data)
+#         if(serializer.is_valid(raise_exception=True)):
+#             serializer.save()
+#             return Response(serializer.data)
+#         else:
+#             return Response({"error":"Invalid data"})
+    
+#     def destroy(self, request, pk=None):
+#         user = request.user.id
+#         try:
+#             folder = Folder.objects.get(pk=pk,owner=user)
+#         except Folder.DoesNotExist:
+#             return Response({"error": "Folder does not exist"}, status=status.HTTP_404_NOT_FOUND)
+
+#         self.perform_destroy(folder)
+#         return Response({'msg':"folder deleted"},status=status.HTTP_204_NO_CONTENT)
+
+#     # def partial_update(self, request, pk=None):
+#     #     try:
+#     #         folder = Folder.objects.get(pk=pk,owner=user)
+#     #     except Folder.DoesNotExist:
+#     #         return Response({"error": "Folder does not exist"}, status=status.HTTP_404_NOT_FOUND)
+#     #     # request_data = request.data.copy()
+#     #     request.data['org'] = owner_org_ids 
+#     #     request.data['owner'] = user.id
+#     #     request_data.pop('dept', None)      
+#     #     print(request.data)
+#     #     serializer = self.get_serializer(folder, data=request.data, partial=True)
+#     #     if serializer.is_valid(raise_exception=True):
+#     #         serializer.save()
+#     #         return Response(serializer.data)
+#     #     else:
+#     #         return Response({"error": "Invalid data"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FolderViewSet(GenericViewSet, mixins.ListModelMixin, mixins.CreateModelMixin, mixins.DestroyModelMixin):
+    authentication_classes = [FirebaseAuthBackend]
     permission_classes = [OthersPerm]
     serializer_class = FolderSerializer
-    queryset = Folder.objects.all()
 
-    def list(self,request):
-        user_org = request.user.org.id
+    def list(self, request):
+        user_org = request.user.org
         user_id = request.user.id
-        queryset = Folder.objects.filter(org=user_org,owner=user_id)
-        serializer = self.get_serializer(queryset,many=True)
+        folders_ref = db.collection('folders').where('org', '==', user_org).where('owner', '==', user_id)
+        folders = [{**doc.to_dict(), 'id': doc.id} for doc in folders_ref.stream()]
+        serializer = self.get_serializer(folders, many=True)
         return Response(serializer.data)
-        
-    def create(self,request):
+
+    def create(self, request):
         user = request.user
-        owner_org_id = user.org.id
-        owner_dept  = user.dept.id
+        owner_org_id = user.org
+        owner_dept = user.dept
         request.data['org'] = owner_org_id
         request.data['dept'] = owner_dept 
         request.data['owner'] = user.id
-        serializer = self.get_serializer(data=request.data)
-        if(serializer.is_valid(raise_exception=True)):
-            serializer.save()
-            return Response(serializer.data)
+
+        # Saving data to Firestore
+        folders_ref = db.collection('folders')
+        new_folder_ref = folders_ref.add({"dept": owner_dept, "org": owner_org_id, "owner": user.id, "name": request.data['name'], "metadata": request.data['metadata']})
+        new_folder = new_folder_ref[1].get()
+        
+        # Adding the document ID to the response
+        folder_data = {**new_folder.to_dict(), 'id': new_folder.id}
+        
+        if new_folder.exists:
+            return Response(folder_data, status=status.HTTP_201_CREATED)
         else:
-            return Response({"error":"Invalid data"})
-    
+            return Response({"error": "Invalid request"}, status=status.HTTP_400_BAD_REQUEST)
+
+
     def destroy(self, request, pk=None):
         user = request.user.id
-        try:
-            folder = Folder.objects.get(pk=pk,owner=user)
-        except Folder.DoesNotExist:
+        folder_ref = db.collection('folders').document(pk)
+        folder = folder_ref.get()
+        if not folder.exists or folder.to_dict().get('owner') != user:
             return Response({"error": "Folder does not exist"}, status=status.HTTP_404_NOT_FOUND)
+        
+        folder_ref.delete()
+        return Response({'msg': "Folder deleted"}, status=status.HTTP_204_NO_CONTENT)
 
-        self.perform_destroy(folder)
-        return Response({'msg':"folder deleted"},status=status.HTTP_204_NO_CONTENT)
-
-    # def partial_update(self, request, pk=None):
-    #     try:
-    #         folder = Folder.objects.get(pk=pk,owner=user)
-    #     except Folder.DoesNotExist:
-    #         return Response({"error": "Folder does not exist"}, status=status.HTTP_404_NOT_FOUND)
-    #     # request_data = request.data.copy()
-    #     request.data['org'] = owner_org_ids 
-    #     request.data['owner'] = user.id
-    #     request_data.pop('dept', None)      
-    #     print(request.data)
-    #     serializer = self.get_serializer(folder, data=request.data, partial=True)
-    #     if serializer.is_valid(raise_exception=True):
-    #         serializer.save()
-    #         return Response(serializer.data)
-    #     else:
-    #         return Response({"error": "Invalid data"}, status=status.HTTP_400_BAD_REQUEST)
-
-
-
+    def partial_update(self, request, pk=None):
+        user = request.user
+        folder_ref = db.collection('folders').document(pk)
+        folder = folder_ref.get()
+        if not folder.exists or folder.to_dict().get('owner') != user.id:
+            return Response({"error": "Folder does not exist"}, status=status.HTTP_404_NOT_FOUND)
+        
+        request.data['org'] = user.org
+        request.data['owner'] = user.id
+        folder_ref.update(request.data)
+        updated_folder = folder_ref.get().to_dict()
+        serializer = self.get_serializer(data=updated_folder)
+        if serializer.is_valid(raise_exception=True):
+            return Response(serializer.data)
+        else:
+            return Response({"error": "Invalid data"}, status=status.HTTP_400_BAD_REQUEST)
 
 class FolderInteractViewSet(GenericViewSet,mixins.ListModelMixin,ExtraChecksMixin):
     authentication_classes = [SupabaseAuthBackend]
@@ -289,7 +491,58 @@ class FolderInteractViewSet(GenericViewSet,mixins.ListModelMixin,ExtraChecksMixi
             return Response({"error":"You do not own this folder"},status=status.HTTP_401_UNAUTHORIZED)
 
 
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def add_file_to_folder(request, folder_id):
+    user = request.user
+    try:
+        file_id = request.data['file_id']
+    except KeyError:
+        return Response({"file_id": "field required"}, status=status.HTTP_400_BAD_REQUEST)
 
+    folder_ref = db.collection('folders').document(folder_id)
+    file_ref = db.collection('files','organisations',user.org).document(file_id)
+
+    folder_doc = folder_ref.get()
+    file_doc = file_ref.get()
+
+    if not folder_doc.exists:
+        return Response({"error": "Invalid folder"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not file_doc.exists:
+        return Response({"error": "Invalid file"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        file_ref.update({'folder_id': folder_id})
+        return Response("File added successfully", status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def list_files_in_current_folder(request, folder_id):
+    user = request.user
+    org_id = user.org
+
+    folder_ref = db.collection('folders').document(folder_id)
+    folder_doc = folder_ref.get()
+
+    if not folder_doc.exists:
+        return Response({"error": "You do not own this folder"}, status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        files_ref = db.collection('files','organisations',org_id).where('folder_id', '==', folder_id)
+        files = files_ref.stream()
+        file_list = [file.to_dict() for file in files]
+
+        return Response(file_list, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 #  Below are the endpoints used at the Sender's side.
 class ShareViewSetSender(
@@ -408,6 +661,140 @@ class ShareViewSetSender(
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+def check_file_ownership(request, file_id):
+    # Replace this with your logic to check if the user owns the file
+    user = request.user
+  
+    file_ref = db.collection('files','organisations',user.org).document(file_id).get()
+   
+    if file_ref.exists and file_ref.to_dict().get('owner_id') == user.id:
+        return True
+    return False
+
+@api_view(['DELETE'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def destroy(request, file_id):
+    if check_file_ownership(request, file_id):
+        try:
+            db.collection('shared_files').document(file_id).delete()
+            return Response({"message": "File share deleted successfully"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    else:
+        return Response({"error": "You cannot delete this share"}, status=status.HTTP_403_FORBIDDEN)
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def share_file(request):
+    file_ids = request.data.get("file", [])
+    shared_with = request.data.get("shared_with", [])
+    # TODO implement created at field and cron job to delete expired shares
+    expiration_time = request.data.get("expiration_time", 3600)
+    security_check = request.data.get("security_check", {})
+    user = request.user
+    shared_files = []
+    
+    if not isinstance(file_ids, list):
+        return Response({"error": "file should be a list"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    if len(shared_with) == 0:
+        return Response({"error": "This field 'shared_with' required"}, status=status.HTTP_400_BAD_REQUEST)
+    
+    for file_id in file_ids:
+        is_owner = check_file_ownership(request, file_id)
+       
+        if is_owner:
+            for user_id in shared_with:
+                if db.collection('shared_files','organisations', user.org).where('file_id', '==', file_id).where('shared_with', '==', user_id).get():
+                    return Response({"error": f"File already shared with {user_id}"}, status=status.HTTP_406_NOT_ACCEPTABLE)
+                db.collection('shared_files', 'organisations', user.org).add({
+                    'file_id': file_id,
+                    'shared_with': user_id,
+                    'owner_id': user.id,
+                    'expiration_time': expiration_time,
+                    'security_check': security_check,
+                    'created_at': firestore.SERVER_TIMESTAMP,
+                    'name': db.collection('files','organisations', user.org).document(file_id).get().to_dict().get('name'),
+                })
+                shared_files.append(file_id)
+        else:
+            return Response({"error": "You cannot share this file"}, status=status.HTTP_403_FORBIDDEN)
+    
+    response_data = {
+        "message": "Shares created successfully!",
+        "shared_files": shared_files,
+    }
+    return Response(response_data, status=status.HTTP_201_CREATED)
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def get_file_info(request, file_id):
+    user = request.user
+    cache_key = f"file_info_{file_id}"
+    cache_data = cache.get(cache_key)
+    
+    if cache_data:
+        return Response(cache_data)
+    
+    # Query for shared_with
+    # implement check for expiration time
+
+    shared_with_files = db.collection('shared_files', 'organisations', user.org).where(
+        'file_id', '==', file_id
+    ).where(
+        'shared_with', '==', user.id
+    ).get()
+
+    results = []
+    for doc in shared_with_files:
+        is_valid = check_if_share_is_valid(doc.id, user)
+        if is_valid:
+            result = doc.to_dict()
+            result['id'] = doc.id
+        results.append(result)
+
+    # Query for owner_id
+    owner_file_ref = db.collection('files','organisations', user.org).document(file_id).get()
+    owner_files = []
+    if owner_file_ref.exists and owner_file_ref.to_dict().get('owner_id') == user.id:
+        owner_files.append(owner_file_ref.to_dict())
+
+    # Combine results
+    combined_files = results + owner_files
+
+    if not combined_files:
+        return Response({"error": "No shared file info found"}, status=status.HTTP_404_NOT_FOUND)
+
+    shared_file = combined_files[0]
+    cache.set(cache_key, shared_file, timeout=3600 * 24 * 2)
+    return Response(shared_file, status=status.HTTP_200_OK)
+
+@api_view(['DELETE'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def delete_share(request, file_id):
+    return destroy(request, file_id)
+
+@api_view(['PATCH'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def edit_access(request, file_id):
+    if check_file_ownership(request, file_id):
+        try:
+            db.collection('shared_files').document(file_id).update(request.data)
+            return Response({"message": "Access updated successfully"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    else:
+        return Response({"error": "You cannot modify this share"}, status=status.HTTP_401_UNAUTHORIZED)
 
 # Below will be used at recepient's end
 class ShareViewSetReceiver(
@@ -520,6 +907,146 @@ class ShareViewSetReceiver(
             objs = get_object_or_404(self.queryset, id=kwargs.get("file"))
             signed_url = create_signed(objs.name, 60)
             return Response({"id": objs.id, "signed_url": signed_url})
+
+
+# Utility function to create a signed URL
+def create_signed(file_name, expiration_minutes=60):
+    bucket = storage.bucket()
+    blob = bucket.blob(file_name)
+    url = blob.generate_signed_url(expiration=datetime.timedelta(minutes=expiration_minutes), method="GET")
+    return url
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def retrieve_file_info(request, file_id):
+    user_org = request.user.org
+    try:
+        shared_ref = db.collection('shared_files','organisations', user_org).document(file_id)
+        shared_doc = shared_ref.get()
+
+        if not shared_doc.exists:
+            return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        shared_data = shared_doc.to_dict()
+        if 'geo_enabled' in shared_data:
+            latitude = float(request.query_params.get("latitude", 0))
+            longitude = float(request.query_params.get("longitude", 0))
+            user_location = (latitude, longitude)
+            required_location = (shared_data['geo_enabled']['latitude'], shared_data['geo_enabled']['longitude'])
+            distance_in_kms = user_location.distance(required_location) * 100
+
+            if distance_in_kms > 1:
+                return Response({"error": "Location Not Allowed!"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        return Response(shared_data, status=status.HTTP_200_OK)
+    except ValueError:
+        return Response({"error": "Wrong parameter value"}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+def check_if_share_is_valid(file_id, user):
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    
+    # Retrieve the document
+    doc_list = db.collection('shared_files', 'organisations', user.org).where('file_id', '==', file_id).get()
+    print(user.org, file_id)
+    
+    if not doc_list:
+        return {"error": "File not found"}
+    
+    doc = doc_list[0]
+    
+    if not doc.exists:
+        return {"error": "File not found"}
+    
+    data = doc.to_dict()
+    created_at = data.get('created_at')
+    expiry = data.get('expiration_time')
+    
+    if created_at and expiry:
+        created_at_dt = created_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        expiry_dt = created_at_dt + datetime.timedelta(seconds=expiry)
+        
+        print(f"Created at: {created_at_dt}, Expiry at: {expiry_dt}")
+        print(now > expiry_dt)
+        if now > expiry_dt:
+            # Delete the document if it has expired
+            doc.reference.delete()
+            return False
+        else:
+            # File is still valid
+            return True
+    
+    # If created_at or expiry is not found in the document
+    return {"error": "Invalid file data"}
+    
+    return {"error": "File metadata is missing or invalid"}
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def get_shared_file_url(request, file_id):
+    try:
+        user = request.user
+        user_role = user.role_priv
+        user_org = user.org
+        shared_doc = None  # Initialize shared_doc to avoid reference before assignment
+
+        if not check_file_ownership(request, file_id):
+            if user_role == "org_admin":
+                file_ref = db.collection('files').document(f'organisations/{user_org}/{file_id}')
+                file_doc = file_ref.get()
+                if not file_doc.exists:
+                    return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
+
+                file_name = f'files/{user_org}/{file_doc.to_dict()["name"]}'
+                signed_url = create_signed(file_name)
+                response_data = {"id": file_doc.id, "signed_url": signed_url}
+            else:
+                is_valid = check_if_share_is_valid(file_id, user)
+
+                if not is_valid:
+                    return Response(is_valid, status=status.HTTP_404_NOT_FOUND)
+                
+                shared_list = db.collection('shared_files','organisations',user.org).where('file_id', '==', file_id).where('shared_with', '==', user.id).get()
+                shared_doc_snapshot = shared_list[0]
+                shared_doc = shared_doc_snapshot.to_dict()
+                print(shared_doc)
+                if not shared_doc:
+                    return Response({"error": "Shared file not found"}, status=status.HTTP_404_NOT_FOUND)
+                file_name = f'files/{user_org}/{shared_doc["name"]}'
+                signed_url = create_signed(file_name)
+                response_data = {"id": shared_doc['file_id'], "signed_url": signed_url}
+
+            # Log access event
+            log_data = {
+                "user": user.id,
+                "username": user.username,
+                "user_email": user.email,
+                "profile_pic": user.profilePictureUrl,
+                "file": file_id,
+                "file_name": (shared_doc.get('name') if shared_doc else file_doc.to_dict().get('name')),
+                "event": "file_access",
+                "org": user_org,
+            }
+            db.collection(f'access_logs/organisations/{user_org}').add(log_data)
+
+            return Response(response_data, status=status.HTTP_200_OK)
+        else:
+            file_ref = db.collection('files').document(f'organisations/{user_org}/{file_id}')
+            file_doc = file_ref.get()
+            if not file_doc.exists:
+                return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            file_name = f'files/{user_org}/{file_doc.to_dict()["name"]}'
+            signed_url = create_signed(file_name)
+            return Response({"id": file_doc.id, "signed_url": signed_url})
+    except Exception as e:
+        print(e)
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class LoggingView(

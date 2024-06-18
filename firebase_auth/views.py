@@ -76,7 +76,7 @@ def login(request):
                     'is_authenticated': True,
                     }
 
-                    return JsonResponse({'user': user_dict, 'message': 'Logged In updated successfully'}, status=200)  # Fix: Wrap 'user' in a dictionary
+                    return JsonResponse({'user': user_dict, 'message': 'Logged In successfully'}, status=200)  # Fix: Wrap 'user' in a dictionary
                 except Exception as e:
                     return JsonResponse({'error': str(e)}, status=500)
         except Exception as e:

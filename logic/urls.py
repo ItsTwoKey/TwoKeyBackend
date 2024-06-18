@@ -1,5 +1,5 @@
 from django.urls import include, path,re_path
-from .views import DeptView, NUserViewSet, OrgView, RolesViewset ,AUserViewSet,InviteUserView, create_dept, create_orgs, delete_dept, elevate, list_depts, list_orgs, list_roles, list_users, update_dept
+from .views import DeptView, NUserViewSet, OrgView, RolesViewset ,AUserViewSet,InviteUserView, create_dept, create_orgs, delete_dept, delete_user, elevate, get_user_info, list_depts, list_orgs, list_roles, list_users, update_dept
 from rest_framework.routers import DefaultRouter
 
 router =DefaultRouter()
@@ -18,9 +18,9 @@ urlpatterns = [
 
     # User Paths For Admins
     re_path(r'^users/list_users/?(?P<dept>[\w-]*)',list_users,name="list_users"),
-    re_path(r'users/getUserInfo/(?P<id>[\w-]*)',AUserViewSet.as_view({'get':"get_user_info"}),name="Getuser Info"),
+    re_path(r'users/getUserInfo/(?P<id>[\w-]*)',get_user_info,name="get_user_info"),
     re_path(r'^users/elevate/(?P<id>[\w-]+)', elevate, name='elevate'),
-    re_path(r'^users/deleteUser/?(?P<id>[\w-]*)',AUserViewSet.as_view({'delete':'delete_user'}),name="delete user"),
+    re_path(r'^users/deleteUser/?(?P<id>[\w-]*)',delete_user,name="delete_user"),
     path('users/invite',InviteUserView.as_view({'post':"invite_driver"}),name='InviteUsers'),
     path('users/invites/pending',InviteUserView.as_view({'get':"get_pending_invites"}),name='Get Pending user Invites'),
     # For Normal Users

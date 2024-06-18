@@ -2,15 +2,17 @@
 import base64
 from datetime import timedelta
 import uuid
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, authentication_classes
 from rest_framework.response import Response
 from rest_framework import status
 from firebase_admin import auth, storage
 from django.views.decorators.csrf import csrf_exempt
+from backend.firebase_auth import FirebaseAuthBackend
 from backend.firebase_admin_init import db
 
 @csrf_exempt
 @api_view(['PUT'])
+@authentication_classes([FirebaseAuthBackend])
 def update_profile(request):
     data = request.data
     id_token = data.get('idToken')
@@ -49,7 +51,8 @@ def update_profile(request):
         # Fetch user information from Firestore
         user_ref = db.collection('users').document(uid)
         user_ref.update(update_data)  # Update with the provided profile data
-
-        return Response({"message": "Profile updated successfully"}, status=status.HTTP_200_OK)
+        # Send the profile data back to the client
+        user_dict = user_ref.get().to_dict()
+        return Response(user_dict, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

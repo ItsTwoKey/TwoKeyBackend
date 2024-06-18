@@ -12,6 +12,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import generics
 from rest_framework.decorators import action, permission_classes
+from rest_framework.status import HTTP_204_NO_CONTENT, HTTP_404_NOT_FOUND
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -451,7 +452,7 @@ class AUserViewSet(
 
 
 @api_view(['GET'])
-@permission_classes([OrgadminRequired])
+@permission_classes([OthersPerm])
 @csrf_exempt
 @authentication_classes([FirebaseAuthBackend])
 def list_users(request, *args, **kwargs):
@@ -554,13 +555,29 @@ def get_user_info(request, **kwargs):
 
 @api_view(['DELETE'])
 @permission_classes([OrgadminRequired])
-@csrf_exempt
 @authentication_classes([FirebaseAuthBackend])
+@csrf_exempt
 def delete_user(request, **kwargs):
     user = request.user
     user_id = kwargs.get('id')
-    db.collection('users').document(user_id).delete()
-    return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if not user_id:
+        return JsonResponse({'error': 'User ID not provided'}, status=HTTP_404_NOT_FOUND)
+
+    # Delete user from Firestore
+    user_doc_ref = db.collection('users').document(user_id)
+    if user_doc_ref.get().exists:
+        user_doc_ref.delete()
+    else:
+        return JsonResponse({'error': 'User not found in Firestore'}, status=HTTP_404_NOT_FOUND)
+
+    # Delete user from Firebase Authentication
+    try:
+        auth.delete_user(user_id)
+    except auth.AuthError as e:
+        return JsonResponse({'error': f'Failed to delete user from Firebase Auth: {e}'}, status=HTTP_404_NOT_FOUND)
+    
+    return JsonResponse({'message': 'User deleted successfully'}, status=HTTP_204_NO_CONTENT)
 
 
 
