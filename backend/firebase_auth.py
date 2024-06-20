@@ -14,6 +14,7 @@ class FirebaseAuthBackend(BaseBackend):
         if request.method != 'POST':
             id_token = request.headers.get('Authorization')
             cache_key = f"authenticated_user:{id_token}"
+            
         else:
             data = json.loads(request.body)
             id_token = data.get('idToken') 
@@ -29,7 +30,6 @@ class FirebaseAuthBackend(BaseBackend):
 
         try:
             decoded_token = auth.verify_id_token(id_token=id_token)
-
             # Get the UID from the decoded token
             uid = decoded_token.get('uid')
 

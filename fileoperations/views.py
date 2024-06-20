@@ -709,7 +709,8 @@ def share_file(request):
        
         if is_owner:
             for user_id in shared_with:
-                if db.collection('shared_files','organisations', user.org).where('file_id', '==', file_id).where('shared_with', '==', user_id).get():
+                is_valid = check_if_share_is_valid(file_id, user)
+                if db.collection('shared_files','organisations', user.org).where('file_id', '==', file_id).where('shared_with', '==', user_id).get() and is_valid:
                     return Response({"error": f"File already shared with {user_id}"}, status=status.HTTP_406_NOT_ACCEPTABLE)
                 db.collection('shared_files', 'organisations', user.org).add({
                     'file_id': file_id,
@@ -982,7 +983,6 @@ def check_if_share_is_valid(file_id, user):
     # If created_at or expiry is not found in the document
     return {"error": "Invalid file data"}
     
-    return {"error": "File metadata is missing or invalid"}
 
 @api_view(['POST'])
 @authentication_classes([FirebaseAuthBackend])
@@ -1031,9 +1031,10 @@ def get_shared_file_url(request, file_id):
                 "file_name": (shared_doc.get('name') if shared_doc else file_doc.to_dict().get('name')),
                 "event": "file_access",
                 "org": user_org,
+                "timestamp": firestore.SERVER_TIMESTAMP,
             }
-            db.collection(f'access_logs/organisations/{user_org}').add(log_data)
-
+            log_data=db.collection(f'access_logs/organisations/{user_org}').add(log_data)
+           
             return Response(response_data, status=status.HTTP_200_OK)
         else:
             file_ref = db.collection('files').document(f'organisations/{user_org}/{file_id}')
@@ -1286,6 +1287,151 @@ class LoggingView(
             return Response(
                 {"error": "invalid request"}, status=status.HTTP_400_BAD_REQUEST
             )
+
+
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def event_log_handler(request, *args, **kwargs):
+    user = request.user
+    file_id = kwargs.get("file")
+    allowed_events = ["screenshot", "download"]
+
+    event = request.GET.get("event", "screenshot")
+    if event not in allowed_events:
+        return Response({"error": "invalid parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+    return create_log(request, user, event, *args, **kwargs)
+
+def create_log(request, user, event, *args, **kwargs):
+    try:
+        file_id = kwargs.get("file")
+        shared_ref = db.collection('shared_files', 'organisations', user.org).where('shared_with', '==', user.id).where('file_id', '==', file_id).stream()
+        shared = list(shared_ref)
+
+        if not shared:
+            return Response({"error": "invalid share"}, status=status.HTTP_400_BAD_REQUEST)
+
+        file_ref = db.collection('files', 'organisations', user.org).document(file_id).get()
+        if not file_ref.exists:
+            return Response({"error": "file does not exist"}, status=status.HTTP_400_BAD_REQUEST)
+
+        access_log_data = {
+            "user": user.id,
+            "username": user.username,
+            "user_email": user.email,
+            "profile_pic": user.profilePictureUrl,
+            "file": file_id,
+            "file_name": file_ref.to_dict()['name'],
+            "event": event,
+            "org": user.org,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        }
+
+        db.collection(f'access_logs/organisations/{user.org}').add(access_log_data)
+
+        return Response({"message": "event logged successfully"}, status=status.HTTP_201_CREATED)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OthersPerm])
+@csrf_exempt
+def get_logs(request, *args, **kwargs):
+    user = request.user
+    event = kwargs.get("event")
+    file = kwargs.get("file")
+
+    try:
+        n = int(request.GET.get("recs", "0"))
+        all_logs = int(request.GET.get("global", "1"))
+    except ValueError:
+        return Response({"error": "invalid parameter"}, status=status.HTTP_400_BAD_REQUEST)
+
+    all_events = ["access", "download", "screen"]
+
+    if event in all_events:
+        event_filter = event_selector(event)
+        if file:
+            return handle_event_by_file(request, user, event_filter, file, n)
+        else:
+            return handle_event_all(request, user, event_filter, n)
+    elif event == "dues":
+        return handle_due_event_all(user, n)
+    else:
+        if file:
+            return handle_all_by_file(request, user, file, n)
+        else:
+            return handle_all(request, user, n, all_logs)
+
+def event_selector(event_name):
+    event_filter = {"include": {"event": []}, "exclude": {"event": []}}
+    if event_name == "access":
+        event_filter["include"]["event"].append("file_access")
+    elif event_name == "download":
+        event_filter["include"]["event"].append("download")
+    elif event_name == "screen":
+        event_filter["include"]["event"].append("screenshot")
+    return event_filter
+
+def handle_event_by_file(request, user, event_filter, file, n):
+    try:
+        cache_key = f"log_{event_filter}_{file}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+
+        logs_ref = db.collection('access_logs', 'organisations', user.org).where('file', '==', file).where('org', '==', user.org).where('event', 'in', event_filter["include"]["event"]).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(n)
+        logs = [log.to_dict() for log in logs_ref.stream()]
+
+        cache.set(cache_key, logs, timeout=3600*24)
+        return Response(logs)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+def handle_event_all(request, user, event_filter, n):
+    try:
+        logs_ref = db.collection('access_logs', 'organisations', user.org).where('org', '==', user.org).where('event', 'in', event_filter["include"]["event"]).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(n)
+        logs = [log.to_dict() for log in logs_ref.stream()]
+        return Response(logs)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+def handle_due_event_all(user, n):
+    try:
+        files_ref = db.collection('shared_files').where('file_owner_org', '==', user.org).where('state', '==', 'due').order_by('last_modified_at', direction=firestore.Query.DESCENDING).limit(n)
+        files = [file.to_dict() for file in files_ref.stream()]
+        return Response(files)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+def handle_all_by_file(request, user, file, n):
+    try:
+        cache_key = f"log_all_{file}"
+        cached_data = cache.get(cache_key)
+        if cached_data:
+            return Response(cached_data)
+
+        logs_ref = db.collection('access_logs', 'organisations', user.org).where('file', '==', file).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(n)
+        logs = [log.to_dict() for log in logs_ref.stream()]
+
+        cache.set(cache_key, logs, timeout=3600*24)
+        return Response(logs)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+def handle_all(request, user, n, all_logs):
+    try:
+        if all_logs == 0:
+            logs_ref = db.collection('access_logs','organisations', user.org).where('user', '==', user.uid).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(n)
+        else:
+            logs_ref = db.collection('access_logs', 'organisations', user.org).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(n)
+        logs = [log.to_dict() for log in logs_ref.stream()]
+        return Response(logs)
+    except Exception as error:
+        return Response({"error": str(error)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 # class SetDepartment(APIView):

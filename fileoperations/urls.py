@@ -27,8 +27,8 @@ urlpatterns = [
     path('getPresigned/<str:file_id>', get_shared_file_url, name="get_shared_file_url"),
 
     # Store ScreenShot Attempt
-    re_path(r'logEvent/(?P<file>[\w-]*)',LoggingView.as_view({'get':'event_log_handler'}),name="Create Logs"),
-    re_path(r'getLogs/?(?:(?P<event>[\w-]*)/)?(?P<file>[\w-]*)',LoggingView.as_view({'get':'get_logs'}),name="Get logs"),
+    re_path(r'logEvent/(?P<file>[\w-]*)',event_log_handler,name="event_log_handler"),
+    re_path(r'getLogs/?(?:(?P<event>[\w-]*)/)?(?P<file>[\w-]*)',get_logs,name="get_logs"),
 
     # GeoLocation Endpoints
     re_path(r'createLocation',GeoLocationView.as_view({'post':'create_location'}),name="Creating an allowed location"),
