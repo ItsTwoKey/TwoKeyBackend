@@ -40,7 +40,7 @@ import bcrypt
 from logic.utils.utils import send_email,generate_confirmation_token,generate_strong_password
 from time import sleep
 
-class InviteUserView(ModelViewSet):
+class InviteUserView(ModelViewSet): 
     authentication_classes = [SupabaseAuthBackend]
     permission_classes = [OrgadminRequired]
     serializer_class = InviteUserSerializer
@@ -134,18 +134,109 @@ class InviteUserView(ModelViewSet):
         return self.list(request)
 
 
+def invite_user_to_firestore(user_data, user_org, department, role, first_name, last_name, confirmation_token):
+    try:
+        # Assuming UsersSerializer validates the data and has `is_valid` method.
+        serializer = UsersSerializer(data=user_data)
+        if serializer.is_valid():
+            user_doc_ref = db.collection('users').document()
+            user_data['id'] = user_doc_ref.id  # Assign the Firestore document ID to the user data.
+            user_doc_ref.set(user_data)
 
+            # Adding user to the organization
+            user_info_ref = db.collection('user_info').document(user_doc_ref.id)
+            user_info_ref.set({
+                'org': user_org,
+                'dept': department,
+                'role_priv': role,
+                'first_name': first_name,
+                'last_name': last_name
+            })
 
+            # Creating Entry in identities Collection
+            identity_ref = db.collection('identities').document(user_doc_ref.id)
+            identity_ref.set({
+                'provider_id': user_doc_ref.id,
+                'user_id': user_doc_ref.id,
+                'identity_data': {
+                    'sub': user_doc_ref.id,
+                    'email': user_data['email'],
+                    'email_verified': False,
+                    'phone_verified': False
+                },
+                'provider': 'email',
+                'email': user_data['email']
+            })
 
+            # Sending the email
+            email_response = send_email(user_data['email'], user_data['encrypted_password'], confirmation_token)
+            print(email_response)
+            return True
+        return False
+    except Exception as e:
+        print(e)  # Log the error for debugging purposes
+        return False
 
+@api_view(['POST'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def invite_driver(request):
+    user_org = request.user.org
 
-        
+    serializer = InviteUserSerializer(data=request.data)
+    
+    if serializer.is_valid():
+        emails = serializer.validated_data.get('emails', [])
+        try:
+            first_name = request.data.get('first_name', '')
+            last_name = request.data.get('last_name', '')
 
- 
+            department_id = request.data['dept_id']
+            department = db.collection('departments').document(department_id).get().to_dict()
 
+            role_id = request.data['role_id']
+            role = db.collection('roles').document(role_id).get().to_dict().get('role')
 
+        except Exception as e:
+            return Response({"msg": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+        failed_invites = []
+        for email in emails:
+            confirmation_token = generate_confirmation_token()
+            password = generate_strong_password()
+            user_data = {
+                "email": email,
+                "encrypted_password": password,
+                "confirmation_token": confirmation_token,
+                "raw_app_meta_data": {"provider": "email", "providers": ["email"]}
+            }
 
+            if not invite_user_to_firestore(user_data, user_org, department, role, first_name, last_name, confirmation_token):
+                failed_invites.append(email)
+
+        if failed_invites:
+            return Response({"msg": "Some invites failed.", "failed_emails": failed_invites}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            return Response({"msg": "Invites sent successfully"}, status=status.HTTP_200_OK)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@authentication_classes([FirebaseAuthBackend])
+@permission_classes([OrgadminRequired])
+@csrf_exempt
+def get_pending_invites(request):
+    user_org = request.user.org
+    pending_users_query = db.collection('users').where('email_confirmed_at', '==', None).stream()
+    pending_users = [user.to_dict() for user in pending_users_query]
+
+    pending_user_info_query = db.collection('user_info').where('org', '==', user_org).where('id', 'in', [user['id'] for user in pending_users]).stream()
+    pending_user_info = [user_info.to_dict() for user_info in pending_user_info_query]
+
+    return Response(pending_user_info)
+
+    
 # Organization ViewSet
 class OrgView(mixins.ListModelMixin, mixins.CreateModelMixin, GenericViewSet):
     authentication_classes = [FirebaseAuthBackend]

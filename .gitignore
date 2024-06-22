@@ -10,3 +10,4 @@ authenticate/__pycache__
 authenticate/migrations
 backend/__pycache__
 backend/migrations
+keys/firebase.json
